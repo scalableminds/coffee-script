@@ -10,6 +10,7 @@ fs        = require 'fs'
 path      = require 'path'
 {Lexer}   = require './lexer'
 {parser}  = require './parser'
+preprocessor = require './preprocessor'
 vm        = require 'vm'
 
 # The file extensions that are considered to be CoffeeScript.
@@ -36,7 +37,7 @@ exports.helpers = require './helpers'
 exports.compile = compile = (code, options = {}) ->
   {merge} = exports.helpers
   try
-    js = (parser.parse lexer.tokenize(code, options)).compile options
+    js = (preprocessor (parser.parse lexer.tokenize(code, options))).compile options
     return js unless options.header
   catch err
     err.message = "In #{options.filename}, #{err.message}" if options.filename
@@ -53,9 +54,9 @@ exports.tokens = (code, options) ->
 # or traverse it by using `.traverseChildren()` with a callback.
 exports.nodes = (source, options) ->
   if typeof source is 'string'
-    parser.parse lexer.tokenize source, options
+    preprocessor parser.parse lexer.tokenize source, options
   else
-    parser.parse source
+    preprocessor parser.parse source
 
 # Compile and execute a string of CoffeeScript (on the server), correctly
 # setting `__filename`, `__dirname`, and relative `require()`.

@@ -20,6 +20,27 @@
                                                         |_|
 
 
+Added a simple preprocessor for CoffeeScript.
+It provides a custom syntax for defining dependencies for RequireJS.
+
+Source:
+
+    ### define
+    jquery : $
+    underscore : _
+    ###
+
+    code()
+
+
+Output:
+   
+    define(["jquery", "underscore"], function ($, _) {
+      code();
+    });
+
+---
+
   CoffeeScript is a little language that compiles into JavaScript.
 
   Install Node.js, and then the CoffeeScript compiler:
