@@ -39,6 +39,7 @@ SWITCHES = [
   ['-i', '--interactive',     'run an interactive CoffeeScript REPL']
   ['-j', '--join [FILE]',     'concatenate the source CoffeeScript before compiling']
   ['-l', '--lint',            'pipe the compiled JavaScript through JavaScript Lint']
+  ['-m', '--map',             'generate source map and save as .map files']
   ['-n', '--nodes',           'print out the parse tree that the parser produces']
   [      '--nodejs [ARGS]',   'pass options directly to the "node" binary']
   ['-o', '--output [DIR]',    'set the output directory for compiled JavaScript']
@@ -56,7 +57,6 @@ sourceCode   = []
 notSources   = {}
 watchers     = {}
 optionParser = null
-coffee_exts  = ['.coffee', '.litcoffee']
 
 # Run `coffee` by parsing passed options and determining what action to take.
 # Many flags cause us to divert before compiling anything. Flags passed after
@@ -79,19 +79,14 @@ exports.run = ->
     compilePath source, yes, path.normalize source
 
 # Compile a path, which could be a script or a directory. If a directory
-# is passed, recursively compile all '.coffee' and '.litcoffee' extension source
-# files in it and all subdirectories.
+# is passed, recursively compile all '.coffee', '.litcoffee', and '.coffee.md'
+# extension source files in it and all subdirectories.
 compilePath = (source, topLevel, base) ->
   fs.stat source, (err, stats) ->
     throw err if err and err.code isnt 'ENOENT'
     if err?.code is 'ENOENT'
-      if topLevel and source and path.extname(source) not in coffee_exts
-        source = sources[sources.indexOf(source)] = "#{source}.coffee"
-        return compilePath source, topLevel, base
-      if topLevel
-        console.error "File not found: #{source}"
-        process.exit 1
-      return
+      console.error "File not found: #{source}"
+      process.exit 1
     if stats.isDirectory() and path.dirname(source) isnt 'node_modules'
       watchDir source, base if opts.watch
       fs.readdir source, (err, files) ->
@@ -103,7 +98,7 @@ compilePath = (source, topLevel, base) ->
         sourceCode[index..index] = files.map -> null
         files.forEach (file) ->
           compilePath (path.join source, file), no, base
-    else if topLevel or path.extname(source) in coffee_exts
+    else if topLevel or helpers.isCoffee source
       watch source, base if opts.watch
       fs.readFile source, (err, code) ->
         throw err if err and err.code isnt 'ENOENT'
@@ -117,9 +112,9 @@ compilePath = (source, topLevel, base) ->
 # Compile a single source script, containing the given code, according to the
 # requested options. If evaluating the script directly sets `__filename`,
 # `__dirname` and `module.filename` to be correct relative to the script's path.
-compileScript = (file, input, base) ->
+compileScript = (file, input, base=null) ->
   o = opts
-  options = compileOptions file
+  options = compileOptions file, base
   try
     t = task = {file, input, options}
     CoffeeScript.emit 'compile', task
@@ -127,20 +122,33 @@ compileScript = (file, input, base) ->
     else if o.nodes       then printLine CoffeeScript.nodes(t.input, t.options).toString().trim()
     else if o.run         then CoffeeScript.run t.input, t.options
     else if o.join and t.file isnt o.join
+      t.input = helpers.invertLiterate t.input if helpers.isLiterate file
       sourceCode[sources.indexOf(t.file)] = t.input
       compileJoin()
     else
-      t.output = CoffeeScript.compile t.input, t.options
+      compiled = CoffeeScript.compile t.input, t.options
+      t.output = compiled
+      if o.map
+        t.output = compiled.js
+        t.sourceMap = compiled.v3SourceMap
+
       CoffeeScript.emit 'success', task
-      if o.print          then printLine t.output.trim()
-      else if o.compile   then writeJs t.file, t.output, base
-      else if o.lint      then lint t.file, t.output
+      if o.print
+        printLine t.output.trim()
+      else if o.compile || o.map
+        writeJs base, t.file, t.output, options.jsPath, t.sourceMap
+      else if o.lint
+        lint t.file, t.output
   catch err
     CoffeeScript.emit 'failure', err, task
     return if CoffeeScript.listeners('failure').length
-    return printLine err.message + '\x07' if o.watch
-    printWarn err instanceof Error and err.stack or "ERROR: #{err}"
-    process.exit 1
+    useColors = process.stdout.isTTY and not process.env.NODE_DISABLE_COLORS
+    message = helpers.prettyErrorMessage err, file or '[stdin]', input, useColors
+    if o.watch
+      printLine message + '\x07'
+    else
+      printWarn message
+      process.exit 1
 
 # Attach the appropriate listeners to compile scripts incoming over **stdin**,
 # and write them back to **stdout**.
@@ -247,26 +255,35 @@ removeSource = (source, base, removeJs) ->
           timeLog "removed #{source}"
 
 # Get the corresponding output JavaScript path for a source file.
-outputPath = (source, base) ->
-  filename  = path.basename(source, path.extname(source)) + '.js'
+outputPath = (source, base, extension=".js") ->
+  basename  = helpers.baseFileName source, yes
   srcDir    = path.dirname source
   baseDir   = if base is '.' then srcDir else srcDir.substring base.length
   dir       = if opts.output then path.join opts.output, baseDir else srcDir
-  path.join dir, filename
+  path.join dir, basename + extension
 
 # Write out a JavaScript source file with the compiled code. By default, files
 # are written out in `cwd` as `.js` files with the same name, but the output
 # directory can be customized with `--output`.
-writeJs = (source, js, base) ->
-  jsPath = outputPath source, base
+#
+# If `generatedSourceMap` is provided, this will write a `.map` file into the
+# same directory as the `.js` file.
+writeJs = (base, sourcePath, js, jsPath, generatedSourceMap = null) ->
+  sourceMapPath = outputPath sourcePath, base, ".map"
   jsDir  = path.dirname jsPath
   compile = ->
-    js = ' ' if js.length <= 0
-    fs.writeFile jsPath, js, (err) ->
-      if err
-        printLine err.message
-      else if opts.compile and opts.watch
-        timeLog "compiled #{source}"
+    if opts.compile
+      js = ' ' if js.length <= 0
+      if generatedSourceMap then js = "#{js}\n/*\n//@ sourceMappingURL=#{helpers.baseFileName sourceMapPath}\n*/\n"
+      fs.writeFile jsPath, js, (err) ->
+        if err
+          printLine err.message
+        else if opts.compile and opts.watch
+          timeLog "compiled #{sourcePath}"
+    if generatedSourceMap
+      fs.writeFile sourceMapPath, generatedSourceMap, (err) ->
+        if err
+          printLine "Could not write source map: #{err.message}"
   exists jsDir, (itExists) ->
     if itExists then compile() else exec "mkdir -p #{jsDir}", compile
 
@@ -288,10 +305,11 @@ lint = (file, js) ->
   jsl.stdin.write js
   jsl.stdin.end()
 
-# Pretty-print a stream of tokens.
+# Pretty-print a stream of tokens, sans location data.
 printTokens = (tokens) ->
   strings = for token in tokens
-    [tag, value] = [token[0], token[1].toString().replace(/\n/, '\\n')]
+    tag = token[0]
+    value = token[1].toString().replace(/\n/, '\\n')
     "[#{tag} #{value}]"
   printLine strings.join(' ')
 
@@ -301,16 +319,38 @@ parseOptions = ->
   optionParser  = new optparse.OptionParser SWITCHES, BANNER
   o = opts      = optionParser.parse process.argv[2..]
   o.compile     or=  !!o.output
-  o.run         = not (o.compile or o.print or o.lint)
+  o.run         = not (o.compile or o.print or o.lint or o.map)
   o.print       = !!  (o.print or (o.eval or o.stdio and o.compile))
   sources       = o.arguments
   sourceCode[i] = null for source, i in sources
   return
 
 # The compile-time options to pass to the CoffeeScript compiler.
-compileOptions = (filename) ->
-  literate = path.extname(filename) is '.litcoffee'
-  {filename, literate, bare: opts.bare, header: opts.compile}
+compileOptions = (filename, base) ->
+  answer = {
+    filename
+    literate: helpers.isLiterate(filename)
+    bare: opts.bare
+    header: opts.compile
+    sourceMap: opts.map
+  }
+  if filename
+    if base
+      cwd = process.cwd()
+      jsPath = outputPath filename, base
+      jsDir = path.dirname jsPath
+      answer = helpers.merge answer, {
+        jsPath
+        sourceRoot: path.relative jsDir, cwd
+        sourceFiles: [path.relative cwd, filename]
+        generatedFile: helpers.baseFileName(jsPath)
+      }
+    else
+      answer = helpers.merge answer,
+        sourceRoot: ""
+        sourceFiles: [helpers.baseFileName filename]
+        generatedFile: helpers.baseFileName(filename, yes) + ".js"
+  answer
 
 # Start up a new Node.js instance with the arguments in `--nodejs` passed to
 # the `node` binary, preserving the other options.

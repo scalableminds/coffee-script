@@ -1,8 +1,8 @@
 fs            = require 'fs'
 path          = require 'path'
-{extend}      = require './lib/coffee-script/helpers'
 CoffeeScript  = require './lib/coffee-script'
 {spawn, exec} = require 'child_process'
+helpers       = require './lib/coffee-script/helpers'
 
 # ANSI Terminal Colors.
 bold = red = green = reset = ''
@@ -22,6 +22,12 @@ header = """
    * Released under the MIT License
    */
 """
+
+# Build the CoffeeScript language from source.
+build = (cb) ->
+  files = fs.readdirSync 'src'
+  files = ('src/' + file for file in files when file.match(/\.(lit)?coffee$/))
+  run ['-c', '-o', 'lib/coffee-script'].concat(files), cb
 
 # Run a CoffeeScript through our node/coffee interpreter.
 run = (args, cb) ->
@@ -57,23 +63,23 @@ task 'install', 'install CoffeeScript into /usr/local (or --prefix)', (options) 
   )
 
 
-task 'build', 'build the CoffeeScript language from source', build = (cb) ->
-  files = fs.readdirSync 'src'
-  files = ('src/' + file for file in files when file.match(/\.(lit)?coffee$/))
-  run ['-c', '-o', 'lib/coffee-script'].concat(files), cb
-
+task 'build', 'build the CoffeeScript language from source', build
 
 task 'build:full', 'rebuild the source twice, and run the tests', ->
   build ->
     build ->
       csPath = './lib/coffee-script'
-      delete require.cache[require.resolve csPath]
+      csDir  = path.dirname require.resolve csPath
+
+      for mod of require.cache when csDir is mod[0 ... csDir.length]
+        delete require.cache[mod]
+
       unless runTests require csPath
         process.exit 1
 
 
 task 'build:parser', 'rebuild the Jison parser (run build first)', ->
-  extend global, require('util')
+  helpers.extend global, require('util')
   require 'jison'
   parser = require('./lib/coffee-script/grammar').parser
   fs.writeFile 'lib/coffee-script/parser.js', parser.generate()
@@ -87,7 +93,7 @@ task 'build:ultraviolet', 'build and install the Ultraviolet syntax highlighter'
 
 task 'build:browser', 'rebuild the merged script for inclusion in the browser', ->
   code = ''
-  for name in ['helpers', 'rewriter', 'lexer', 'parser', 'scope', 'nodes', 'coffee-script', 'browser']
+  for name in ['helpers', 'rewriter', 'lexer', 'parser', 'scope', 'nodes', 'sourcemap', 'coffee-script', 'browser']
     code += """
       require['./#{name}'] = new function() {
         var exports = this;
@@ -122,7 +128,7 @@ task 'doc:site', 'watch and continually rebuild the documentation for the websit
 
 
 task 'doc:source', 'rebuild the internal documentation', ->
-  exec 'docco src/*.coffee && cp -rf docs documentation && rm -r docs', (err) ->
+  exec 'docco src/*.*coffee && cp -rf docs documentation && rm -r docs', (err) ->
     throw err if err
 
 
@@ -172,9 +178,11 @@ runTests = (CoffeeScript) ->
       fn.call(fn)
       ++passedTests
     catch e
-      e.description = description if description?
-      e.source      = fn.toString() if fn.toString?
-      failures.push filename: currentFile, error: e
+      failures.push
+        filename: currentFile
+        error: e
+        description: description if description?
+        source: fn.toString() if fn.toString?
 
   # See http://wiki.ecmascript.org/doku.php?id=harmony:egal
   egal = (a, b) ->
@@ -202,22 +210,22 @@ runTests = (CoffeeScript) ->
     return log(message, green) unless failures.length
     log "failed #{failures.length} and #{message}", red
     for fail in failures
-      {error, filename}  = fail
+      {error, filename, description, source}  = fail
       jsFilename         = filename.replace(/\.coffee$/,'.js')
       match              = error.stack?.match(new RegExp(fail.file+":(\\d+):(\\d+)"))
       match              = error.stack?.match(/on line (\d+):/) unless match
       [match, line, col] = match if match
       console.log ''
-      log "  #{error.description}", red if error.description
+      log "  #{description}", red if description
       log "  #{error.stack}", red
       log "  #{jsFilename}: line #{line ? 'unknown'}, column #{col ? 'unknown'}", red
-      console.log "  #{error.source}" if error.source
+      console.log "  #{source}" if source
     return
 
   # Run every test in the `test` folder, recording failures.
   files = fs.readdirSync 'test'
   for file in files when file.match /\.(lit)?coffee$/i
-    literate = path.extname(file) is '.litcoffee'
+    literate = helpers.isLiterate file
     currentFile = filename = path.join 'test', file
     code = fs.readFileSync filename
     try
