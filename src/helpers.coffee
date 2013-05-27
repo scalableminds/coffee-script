@@ -71,12 +71,15 @@ exports.some = Array::some ? (fn) ->
   false
 
 # Simple function for inverting Literate CoffeeScript code by putting the
-# documentation in comments, and bumping the actual code back out to the edge ...
-# producing a string of CoffeeScript code that can be compiled "normally".
+# documentation in comments, producing a string of CoffeeScript code that
+# can be compiled "normally".
 exports.invertLiterate = (code) ->
+  maybe_code = true
   lines = for line in code.split('\n')
-    if match = (/^([ ]{4}|\t)/).exec line
-      line[match[0].length..]
+    if maybe_code and /^([ ]{4}|[ ]{0,3}\t)/.test line
+      line
+    else if maybe_code = /^\s*$/.test line
+      line
     else
       '# ' + line
   lines.join '\n'
@@ -115,8 +118,9 @@ exports.locationDataToString = (obj) ->
       "No location data"
 
 # A `.coffee.md` compatible version of `basename`, that returns the file sans-extension.
-exports.baseFileName = (file, stripExt = no) ->
-  parts = file.split('/')
+exports.baseFileName = (file, stripExt = no, useWinPathSep = no) ->
+  pathSep = if useWinPathSep then /\\|\// else /\//
+  parts = file.split(pathSep)
   file = parts[parts.length - 1]
   return file unless stripExt
   parts = file.split('.')
