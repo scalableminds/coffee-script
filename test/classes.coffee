@@ -699,6 +699,15 @@ test "#2052: classes should work in strict mode", ->
   catch e
     ok no
 
+test "directives in class with extends ", ->
+  strictTest = """
+    class extends Object
+      ### comment ###
+      'use strict'
+      do -> eq this, undefined
+  """
+  CoffeeScript.run strictTest, bare: yes
+
 test "#2630: class bodies can't reference arguments", ->
   throws ->
     CoffeeScript.compile('class Test then arguments')
@@ -791,3 +800,10 @@ test "#2796: ditto, ditto, ditto", ->
 
   new Base
   eq answer, 'right!'
+
+test "#3063: Class bodies cannot contain pure statements", ->
+  throws -> CoffeeScript.compile """
+    class extends S
+      return if S.f
+      @f: => this
+  """

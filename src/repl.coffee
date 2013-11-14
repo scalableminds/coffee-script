@@ -3,7 +3,7 @@ path = require 'path'
 vm = require 'vm'
 nodeREPL = require 'repl'
 CoffeeScript = require './coffee-script'
-{merge, prettyErrorMessage} = require './helpers'
+{merge, updateSyntaxError} = require './helpers'
 
 replDefaults =
   prompt: 'coffee> ',
@@ -27,9 +27,15 @@ replDefaults =
         new Assign (new Value new Literal '_'), ast, '='
       ]
       js = ast.compile bare: yes, locals: Object.keys(context)
-      cb null, vm.runInContext(js, context, filename)
+      result = if context is global
+        vm.runInThisContext js, filename 
+      else
+        vm.runInContext js, context, filename
+      cb null, result
     catch err
-      cb prettyErrorMessage(err, filename, input, yes)
+      # AST's `compile` does not add source code information to syntax errors.
+      updateSyntaxError err, input
+      cb err
 
 addMultilineHandler = (repl) ->
   {rli, inputStream, outputStream} = repl
@@ -125,6 +131,8 @@ module.exports =
       console.warn "Node 0.8.0+ required for CoffeeScript REPL"
       process.exit 1
 
+    require './extensions'
+    process.argv = ['coffee'].concat process.argv[2..]
     opts = merge replDefaults, opts
     repl = nodeREPL.start opts
     repl.on 'exit', -> repl.outputStream.write '\n'

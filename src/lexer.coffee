@@ -35,18 +35,19 @@ exports.Lexer = class Lexer
   # Before returning the token stream, run it through the [Rewriter](rewriter.html)
   # unless explicitly asked not to.
   tokenize: (code, opts = {}) ->
-    @literate = opts.literate  # Are we lexing literate CoffeeScript?
-    @indent   = 0              # The current indentation level.
-    @indebt   = 0              # The over-indentation at the current level.
-    @outdebt  = 0              # The under-outdentation at the current level.
-    @indents  = []             # The stack of all current indentation levels.
-    @ends     = []             # The stack for pairing up tokens.
-    @tokens   = []             # Stream of parsed tokens in the form `['TYPE', value, location data]`.
+    @literate   = opts.literate  # Are we lexing literate CoffeeScript?
+    @indent     = 0              # The current indentation level.
+    @baseIndent = 0              # The overall minimum indentation level
+    @indebt     = 0              # The over-indentation at the current level.
+    @outdebt    = 0              # The under-outdentation at the current level.
+    @indents    = []             # The stack of all current indentation levels.
+    @ends       = []             # The stack for pairing up tokens.
+    @tokens     = []             # Stream of parsed tokens in the form `['TYPE', value, location data]`.
 
     @chunkLine =
-        opts.line or 0         # The start line for the current @chunk.
+      opts.line or 0         # The start line for the current @chunk.
     @chunkColumn =
-        opts.column or 0       # The start column of the current @chunk.
+      opts.column or 0       # The start column of the current @chunk.
     code = @clean code         # The stripped, cleaned original source code.
 
     # At every position, run through this list of attempted matches,
@@ -83,8 +84,8 @@ exports.Lexer = class Lexer
     code = code.slice(1) if code.charCodeAt(0) is BOM
     code = code.replace(/\r/g, '').replace TRAILING_SPACES, ''
     if WHITESPACE.test code
-        code = "\n#{code}"
-        @chunkLine--
+      code = "\n#{code}"
+      @chunkLine--
     code = invertLiterate code if @literate
     code
 
@@ -195,7 +196,7 @@ exports.Lexer = class Lexer
         if 0 < string.indexOf '#{', 1
           @interpolateString string[1...-1], strOffset: 1, lexedLength: string.length
         else
-          @token 'STRING', @escapeLines string, 0, string.length
+          @token 'STRING', @escapeLines(string), 0, string.length
       else
         return 0
     if octalEsc = /^(?:\\.|[^\\])*\\(?:0[0-7]|[1-7])/.test string
@@ -254,7 +255,7 @@ exports.Lexer = class Lexer
   heregexToken: (match) ->
     [heregex, body, flags] = match
     if 0 > body.indexOf '#{'
-      re = body.replace(HEREGEX_OMIT, '').replace(/\//g, '\\/')
+      re = @escapeLines body.replace(HEREGEX_OMIT, '$1$2').replace(/\//g, '\\/'), yes
       if re.match /^\*/ then @error 'regular expressions cannot begin with `*`'
       @token 'REGEX', "/#{ re or '(?:)' }/#{flags}", 0, heregex.length
       return heregex.length
@@ -266,7 +267,7 @@ exports.Lexer = class Lexer
       if tag is 'TOKENS'
         tokens.push value...
       else if tag is 'NEOSTRING'
-        continue unless value = value.replace HEREGEX_OMIT, ''
+        continue unless value = value.replace HEREGEX_OMIT, '$1$2'
         # Convert NEOSTRING into STRING
         value = value.replace /\\/g, '\\\\'
         token[0] = 'STRING'
@@ -322,11 +323,16 @@ exports.Lexer = class Lexer
         @indebt = size - @indent
         @suppressNewlines()
         return indent.length
+      unless @tokens.length
+        @baseIndent = @indent = size
+        return indent.length
       diff = size - @indent + @outdebt
       @token 'INDENT', diff, indent.length - size, size
       @indents.push diff
       @ends.push 'OUTDENT'
       @outdebt = @indebt = 0
+    else if size < @baseIndent
+      @error 'missing indentation', indent.length
     else
       @indebt = 0
       @outdentToken @indent - size, noNewlines, indent.length
@@ -691,10 +697,11 @@ exports.Lexer = class Lexer
     quote + @escapeLines(body, heredoc) + quote
 
   # Throws a compiler error on the current position.
-  error: (message) ->
+  error: (message, offset = 0) ->
     # TODO: Are there some cases we could improve the error line number by
     # passing the offset in the chunk where the error happened?
-    throwSyntaxError message, first_line: @chunkLine, first_column: @chunkColumn
+    [first_line, first_column] = @getLineAndColumnFromChunk offset
+    throwSyntaxError message, {first_line, first_column}
 
 # Constants
 # ---------
@@ -799,9 +806,13 @@ REGEX = /// ^
   /) ([imgy]{0,4}) (?!\w)
 ///
 
-HEREGEX      = /// ^ /{3} ([\s\S]+?) /{3} ([imgy]{0,4}) (?!\w) ///
+HEREGEX      = /// ^ /{3} ((?:\\?[\s\S])+?) /{3} ([imgy]{0,4}) (?!\w) ///
 
-HEREGEX_OMIT = /\s+(?:#.*)?/g
+HEREGEX_OMIT = ///
+    ((?:\\\\)+)     # consume (and preserve) an even number of backslashes
+  | \\(\s|/)        # preserve escaped whitespace and "de-escape" slashes
+  | \s+(?:#.*)?     # remove whitespace and comments
+///g
 
 # Token cleaning regexes.
 MULTILINER      = /\n/g
