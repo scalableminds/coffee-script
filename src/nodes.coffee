@@ -253,7 +253,7 @@ exports.Block = class Block extends Base
 
   jumps: (o) ->
     for exp in @expressions
-      return exp if exp.jumps o
+      return jumpNode if jumpNode = exp.jumps o
 
   # A Block node does not return its entire body, rather it
   # ensures that the final expression is returned.
@@ -508,6 +508,10 @@ exports.Value = class Value extends Base
 
   isSplice: ->
     last(@properties) instanceof Slice
+
+  looksStatic: (className) ->
+    @base.value is className and @properties.length and
+      @properties[0].name?.value isnt 'prototype'
 
   # The value can be unwrapped as its inner node, if there are no attached
   # properties.
@@ -1036,8 +1040,6 @@ exports.Class = class Class extends Base
         else
           if assign.variable.this
             func.static = yes
-            if func.bound
-              func.context = name
           else
             assign.variable = new Value(new Literal(name), [(new Access new Literal 'prototype'), new Access base])
             if func instanceof Code and func.bound
@@ -1046,14 +1048,17 @@ exports.Class = class Class extends Base
       assign
     compact exprs
 
-  # Walk the body of the class, looking for prototype properties to be converted.
+  # Walk the body of the class, looking for prototype properties to be converted
+  # and tagging static assignments.
   walkBody: (name, o) ->
     @traverseChildren false, (child) =>
       cont = true
       return false if child instanceof Class
       if child instanceof Block
         for node, i in exps = child.expressions
-          if node instanceof Value and node.isObject(true)
+          if node instanceof Assign and node.variable.looksStatic name
+            node.value.static = yes
+          else if node instanceof Value and node.isObject(true)
             cont = false
             exps[i] = @addProperties node, name, o
         child.expressions = exps = flatten exps
@@ -1164,8 +1169,8 @@ exports.Assign = class Assign extends Base
         else
           o.scope.find name
     if @value instanceof Code and match = METHOD_DEF.exec name
-      @value.klass = match[1] if match[1]
-      @value.name  = match[2] ? match[3] ? match[4] ? match[5]
+      @value.klass = match[1] if match[2]
+      @value.name  = match[3] ? match[4] ? match[5]
     val = @value.compileToFragments o, LEVEL_LIST
     return (compiledName.concat @makeCode(": "), val) if @context is 'object'
     answer = compiledName.concat @makeCode(" #{ @context or '=' } "), val
@@ -1331,8 +1336,8 @@ exports.Code = class Code extends Base
     delete o.isExistentialEquals
     params = []
     exprs  = []
-    @eachParamName (name) -> # this step must be performed before the others
-      unless o.scope.check name then o.scope.parameter name
+    for param in @params
+      o.scope.parameter param.asReference o
     for param in @params when param.splat
       for {name: p} in @params
         if p.this then p = p.properties[0].name
@@ -1527,7 +1532,7 @@ exports.While = class While extends Base
     {expressions} = @body
     return no unless expressions.length
     for node in expressions
-      return node if node.jumps loop: yes
+      return jumpNode if jumpNode = node.jumps loop: yes
     no
 
   # The main difference from a JavaScript *while* is that the CoffeeScript
@@ -1956,7 +1961,7 @@ exports.For = class For extends While
     for expr, idx in body.expressions
       expr = expr.unwrapAll()
       continue unless expr instanceof Call
-      val = expr.variable.unwrapAll()
+      val = expr.variable?.unwrapAll()
       continue unless (val instanceof Code) or
                       (val instanceof Value and
                       val.base?.unwrapAll() instanceof Code and
@@ -1983,7 +1988,7 @@ exports.Switch = class Switch extends Base
 
   jumps: (o = {block: yes}) ->
     for [conds, block] in @cases
-      return block if block.jumps o
+      return jumpNode if jumpNode = block.jumps o
     @otherwise?.jumps o
 
   makeReturn: (res) ->
@@ -2141,21 +2146,14 @@ NUMBER    = ///^[+-]?(?:
   \d*\.?\d+ (?:e[+-]?\d+)?  # decimal
 )$///i
 
-METHOD_DEF = ///
-  ^
-    (?:
-      (#{IDENTIFIER_STR})
-      \.prototype
-      (?:
-        \.(#{IDENTIFIER_STR})
-      | \[("(?:[^\\"\r\n]|\\.)*"|'(?:[^\\'\r\n]|\\.)*')\]
-      | \[(0x[\da-fA-F]+ | \d*\.?\d+ (?:[eE][+-]?\d+)?)\]
-      )
-    )
-  |
-    (#{IDENTIFIER_STR})
-  $
-///
+METHOD_DEF = /// ^
+  (#{IDENTIFIER_STR})
+  (\.prototype)?
+  (?: \.(#{IDENTIFIER_STR})
+    | \[("(?:[^\\"\r\n]|\\.)*"|'(?:[^\\'\r\n]|\\.)*')\]
+    | \[(0x[\da-fA-F]+ | \d*\.?\d+ (?:[eE][+-]?\d+)?)\]
+  )
+$ ///
 
 # Is a literal value a string/regex?
 IS_STRING = /^['"]/

@@ -14,7 +14,6 @@ mkdirp         = require 'mkdirp'
 {spawn, exec}  = require 'child_process'
 {EventEmitter} = require 'events'
 
-exists         = fs.exists or path.exists
 useWinPathSep  = path.sep is '\\'
 
 # Allow CoffeeScript to emit Node.js events.
@@ -58,6 +57,7 @@ opts         = {}
 sources      = []
 sourceCode   = []
 notSources   = {}
+watchedDirs  = {}
 optionParser = null
 
 # Run `coffee` by parsing passed options and determining what action to take.
@@ -73,21 +73,26 @@ exports.run = ->
   return usage()                                if opts.help
   return version()                              if opts.version
   return require('./repl').start(replCliOpts)   if opts.interactive
-  if opts.watch and not fs.watch
-    return printWarn "The --watch feature depends on Node v0.6.0+. You are running #{process.version}."
   return compileStdio()                         if opts.stdio
-  return compileScript null, sources[0]         if opts.eval
-  return require('./repl').start(replCliOpts)   unless sources.length
-  literals = if opts.run then sources.splice 1 else []
+  return compileScript null, opts.arguments[0]  if opts.eval
+  return require('./repl').start(replCliOpts)   unless opts.arguments.length
+  literals = if opts.run then opts.arguments.splice 1 else []
   process.argv = process.argv[0..1].concat literals
   process.argv[0] = 'coffee'
-  for source in sources
-    compilePath source, yes, path.normalize source
+
+  opts.output = path.resolve opts.output  if opts.output
+  opts.join   = path.resolve opts.join    if opts.join
+  for source in opts.arguments
+    source = path.resolve source
+    compilePath source, yes, source
 
 # Compile a path, which could be a script or a directory. If a directory
 # is passed, recursively compile all '.coffee', '.litcoffee', and '.coffee.md'
 # extension source files in it and all subdirectories.
 compilePath = (source, topLevel, base) ->
+  return if source in sources   or
+            watchedDirs[source] or
+            not topLevel and (notSources[source] or hidden source)
   try
     stats = fs.statSync source
   catch err
@@ -95,19 +100,21 @@ compilePath = (source, topLevel, base) ->
       console.error "File not found: #{source}"
       process.exit 1
     throw err
-  if stats.isDirectory() and path.dirname(source) isnt 'node_modules'
+  if stats.isDirectory()
+    if path.basename(source) is 'node_modules'
+      notSources[source] = yes
+      return
     watchDir source, base if opts.watch
     try
       files = fs.readdirSync source
     catch err
       if err.code is 'ENOENT' then return else throw err
-    index = sources.indexOf source
-    files = files.filter (file) -> not hidden file
-    sources[index..index] = (path.join source, file for file in files)
-    sourceCode[index..index] = files.map -> null
-    files.forEach (file) ->
+    for file in files
       compilePath (path.join source, file), no, base
   else if topLevel or helpers.isCoffee source
+    sources.push source
+    sourceCode.push null
+    delete notSources[source]
     watch source, base if opts.watch
     try
       code = fs.readFileSync source
@@ -116,8 +123,6 @@ compilePath = (source, topLevel, base) ->
     compileScript(source, code.toString(), base)
   else
     notSources[source] = yes
-    removeSource source, base
-
 
 # Compile a single source script, containing the given code, according to the
 # requested options. If evaluating the script directly sets `__filename`,
@@ -128,9 +133,13 @@ compileScript = (file, input, base = null) ->
   try
     t = task = {file, input, options}
     CoffeeScript.emit 'compile', task
-    if      o.tokens      then printTokens CoffeeScript.tokens t.input, t.options
-    else if o.nodes       then printLine CoffeeScript.nodes(t.input, t.options).toString().trim()
-    else if o.run         then CoffeeScript.run t.input, t.options
+    if o.tokens
+      printTokens CoffeeScript.tokens t.input, t.options
+    else if o.nodes
+      printLine CoffeeScript.nodes(t.input, t.options).toString().trim()
+    else if o.run
+      CoffeeScript.register()
+      CoffeeScript.run t.input, t.options
     else if o.join and t.file isnt o.join
       t.input = helpers.invertLiterate t.input if helpers.isLiterate file
       sourceCode[sources.indexOf(t.file)] = t.input
@@ -181,92 +190,116 @@ compileJoin = ->
 # time the file is updated. May be used in combination with other options,
 # such as `--print`.
 watch = (source, base) ->
-
-  prevStats = null
+  watcher        = null
+  prevStats      = null
   compileTimeout = null
 
-  watchErr = (e) ->
-    if e.code is 'ENOENT'
-      return if sources.indexOf(source) is -1
-      try
-        rewatch()
-        compile()
-      catch e
-        removeSource source, base, yes
-        compileJoin()
-    else throw e
+  watchErr = (err) ->
+    throw err unless err.code is 'ENOENT'
+    return unless source in sources
+    try
+      rewatch()
+      compile()
+    catch
+      removeSource source, base
+      compileJoin()
 
   compile = ->
     clearTimeout compileTimeout
     compileTimeout = wait 25, ->
       fs.stat source, (err, stats) ->
         return watchErr err if err
-        return rewatch() if prevStats and stats.size is prevStats.size and
-          stats.mtime.getTime() is prevStats.mtime.getTime()
+        return rewatch() if prevStats and
+                            stats.size is prevStats.size and
+                            stats.mtime.getTime() is prevStats.mtime.getTime()
         prevStats = stats
         fs.readFile source, (err, code) ->
           return watchErr err if err
           compileScript(source, code.toString(), base)
           rewatch()
 
-  try
-    watcher = fs.watch source, compile
-  catch e
-    watchErr e
+  startWatcher = ->
+    watcher = fs.watch source
+    .on 'change', compile
+    .on 'error', (err) ->
+      throw err unless err.code is 'EPERM'
+      removeSource source, base
 
   rewatch = ->
     watcher?.close()
-    watcher = fs.watch source, compile
+    startWatcher()
 
+  try
+    startWatcher()
+  catch err
+    watchErr err
 
 # Watch a directory of files for new additions.
 watchDir = (source, base) ->
+  watcher        = null
   readdirTimeout = null
-  try
-    watcher = fs.watch source, ->
+
+  startWatcher = ->
+    watcher = fs.watch source
+    .on 'error', (err) ->
+      throw err unless err.code is 'EPERM'
+      stopWatcher()
+    .on 'change', ->
       clearTimeout readdirTimeout
       readdirTimeout = wait 25, ->
-        fs.readdir source, (err, files) ->
-          if err
-            throw err unless err.code is 'ENOENT'
-            watcher.close()
-            return unwatchDir source, base
-          for file in files when not hidden(file) and not notSources[file]
-            file = path.join source, file
-            continue if sources.some (s) -> s.indexOf(file) >= 0
-            sources.push file
-            sourceCode.push null
-            compilePath file, no, base
-  catch e
-    throw e unless e.code is 'ENOENT'
+        try
+          files = fs.readdirSync source
+        catch err
+          throw err unless err.code is 'ENOENT'
+          return stopWatcher()
+        for file in files
+          compilePath (path.join source, file), no, base
 
-unwatchDir = (source, base) ->
-  prevSources = sources[..]
-  toRemove = (file for file in sources when file.indexOf(source) >= 0)
-  removeSource file, base, yes for file in toRemove
-  return unless sources.some (s, i) -> prevSources[i] isnt s
-  compileJoin()
+  stopWatcher = ->
+    watcher.close()
+    removeSourceDir source, base
+
+  watchedDirs[source] = yes
+  try
+    startWatcher()
+  catch err
+    throw err unless err.code is 'ENOENT'
+
+removeSourceDir = (source, base) ->
+  delete watchedDirs[source]
+  sourcesChanged = no
+  for file in sources when source is path.dirname file
+    removeSource file, base
+    sourcesChanged = yes
+  compileJoin() if sourcesChanged
 
 # Remove a file from our source list, and source code cache. Optionally remove
 # the compiled JS version as well.
-removeSource = (source, base, removeJs) ->
+removeSource = (source, base) ->
   index = sources.indexOf source
   sources.splice index, 1
   sourceCode.splice index, 1
-  if removeJs and not opts.join
-    jsPath = outputPath source, base
-    exists jsPath, (itExists) ->
-      if itExists
-        fs.unlink jsPath, (err) ->
-          throw err if err and err.code isnt 'ENOENT'
-          timeLog "removed #{source}"
+  unless opts.join
+    silentUnlink outputPath source, base
+    silentUnlink outputPath source, base, '.map'
+    timeLog "removed #{source}"
+
+silentUnlink = (path) ->
+  try
+    fs.unlinkSync path
+  catch err
+    throw err unless err.code in ['ENOENT', 'EPERM']
 
 # Get the corresponding output JavaScript path for a source file.
 outputPath = (source, base, extension=".js") ->
   basename  = helpers.baseFileName source, yes, useWinPathSep
   srcDir    = path.dirname source
-  baseDir   = if base in ['.', './'] then srcDir else srcDir.substring base.length
-  dir       = if opts.output then path.join opts.output, baseDir else srcDir
+  if not opts.output
+    dir = srcDir
+  else if source is base
+    dir = opts.output
+  else
+    dir = path.join opts.output, path.relative base, srcDir
   path.join dir, basename + extension
 
 # Write out a JavaScript source file with the compiled code. By default, files
@@ -291,7 +324,7 @@ writeJs = (base, sourcePath, js, jsPath, generatedSourceMap = null) ->
       fs.writeFile sourceMapPath, generatedSourceMap, (err) ->
         if err
           printLine "Could not write source map: #{err.message}"
-  exists jsDir, (itExists) ->
+  fs.exists jsDir, (itExists) ->
     if itExists then compile() else mkdirp jsDir, compile
 
 # Convenience for cleaner setTimeouts.
@@ -317,9 +350,6 @@ parseOptions = ->
   o.compile     or=  !!o.output
   o.run         = not (o.compile or o.print or o.map)
   o.print       = !!  (o.print or (o.eval or o.stdio and o.compile))
-  sources       = o.arguments
-  sourceCode[i] = null for source, i in sources
-  return
 
 # The compile-time options to pass to the CoffeeScript compiler.
 compileOptions = (filename, base) ->
