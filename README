@@ -18,6 +18,8 @@
      `-.._________..-'                                  | |
                                                         |_|
 
+Install: npm install -g git://github.com/scalableminds/coffee-script.git
+
 
 Added a simple preprocessor for CoffeeScript.
 It provides a custom syntax for defining dependencies for RequireJS.
